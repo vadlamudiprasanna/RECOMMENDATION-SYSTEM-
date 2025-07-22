@@ -1,0 +1,91 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+import numpy as np
+
+url = "http://files.grouplens.org/datasets/movielens/ml-100k/u.data"
+column_names = ['user_id', 'item_id', 'rating', 'timestamp']
+data = pd.read_csv(url, sep='\t', names=column_names)
+data = data.drop('timestamp', axis=1)
+
+user_id_mapping = {id: idx for idx, id in enumerate(data['user_id'].unique())}
+item_id_mapping = {id: idx for idx, id in enumerate(data['item_id'].unique())}
+inv_user_map = {v: k for k, v in user_id_mapping.items()}
+inv_item_map = {v: k for k, v in item_id_mapping.items()}
+
+data['user_id'] = data['user_id'].map(user_id_mapping)
+data['item_id'] = data['item_id'].map(item_id_mapping)
+
+num_users = len(user_id_mapping)
+num_items = len(item_id_mapping)
+
+train_data, test_data = train_test_split(data, test_size=0.2, random_state=42)
+
+class MatrixFactorization(nn.Module):
+    def __init__(self, n_users, n_items, embedding_dim=20):
+        super(MatrixFactorization, self).__init__()
+        self.user_embedding = nn.Embedding(n_users, embedding_dim)
+        self.item_embedding = nn.Embedding(n_items, embedding_dim)
+        self.user_bias = nn.Embedding(n_users, 1)
+        self.item_bias = nn.Embedding(n_items, 1)
+        
+    def forward(self, user, item):
+        user_embedded = self.user_embedding(user)
+        item_embedded = self.item_embedding(item)
+        dot = (user_embedded * item_embedded).sum(1)
+        dot += self.user_bias(user).squeeze() + self.item_bias(item).squeeze()
+        return dot
+
+def to_tensor(df):
+    users = torch.LongTensor(df['user_id'].values)
+    items = torch.LongTensor(df['item_id'].values)
+    ratings = torch.FloatTensor(df['rating'].values)
+    return users, items, ratings
+
+train_users, train_items, train_ratings = to_tensor(train_data)
+test_users, test_items, test_ratings = to_tensor(test_data)
+
+model = MatrixFactorization(num_users, num_items, embedding_dim=20)
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.01)
+epochs = 20
+
+for epoch in range(epochs):
+    model.train()
+    optimizer.zero_grad()
+    predictions = model(train_users, train_items)
+    loss = criterion(predictions, train_ratings)
+    loss.backward()
+    optimizer.step()
+
+    model.eval()
+    with torch.no_grad():
+        test_preds = model(test_users, test_items)
+        test_loss = criterion(test_preds, test_ratings)
+    print(f"Epoch {epoch+1}: Train Loss = {loss.item():.4f} | Test Loss = {test_loss.item():.4f}")
+
+model.eval()
+with torch.no_grad():
+    test_preds = model(test_users, test_items).numpy()
+    test_true = test_ratings.numpy()
+    rmse = np.sqrt(mean_squared_error(test_true, test_preds))
+    print(f"\nFinal RMSE on Test Set: {rmse:.4f}")
+
+def recommend(model, user_id, n=10):
+    model.eval()
+    user_idx = torch.LongTensor([user_id] * num_items)
+    item_idx = torch.LongTensor(range(num_items))
+    with torch.no_grad():
+        scores = model(user_idx, item_idx)
+    top_items = torch.topk(scores, n).indices.numpy()
+    recommended_item_ids = [inv_item_map[i] for i in top_items]
+    return recommended_item_ids
+
+user_internal_id = 10
+recommended_items = recommend(model, user_internal_id, n=10)
+print(f"\nTop 10 recommended item IDs for user {inv_user_map[user_internal_id]}:")
+for i, item_id in enumerate(recommended_items, 1):
+    print(f"{i}. Movie ID: {item_id}")
